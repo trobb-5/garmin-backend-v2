@@ -39,7 +39,6 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         decoded = auth.verify_id_token(id_token)
         firebase_uid = decoded["uid"]
 
-        # FIX: Garth updated the class name from GarthClient to Client
         client = garth.Client()
 
         if request.mfa_code:
@@ -47,7 +46,8 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         else:
             client.login(request.username, request.password)
 
-        dump = client.dump()
+        # FIXED: Use dumps() instead of dump() to get a string for the DB
+        dump = client.dumps()
 
         conn.execute(
             "INSERT OR REPLACE INTO users (firebase_uid, garmin_dump) VALUES (?, ?)",
@@ -75,7 +75,10 @@ async def garmin_today(authorization: str = Header(...)):
         if not row or not row[0]:
             raise HTTPException(status_code=404, detail="No Garmin session found.")
 
-        client = garth.Client.from_dump(row[0])
+        # FIXED: Use loads() to match the dumps() above
+        client = garth.Client()
+        client.loads(row[0])
+        
         today = datetime.now().strftime("%Y-%m-%d")
 
         summary = client.get(f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}").json()
