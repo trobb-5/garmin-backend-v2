@@ -35,6 +35,7 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         else:
             client.login(request.username, request.password)
 
+        # Store session in Firestore
         dump = client.dumps()
         db.collection("users").document(firebase_uid).set({
             "garmin_dump": dump,
@@ -60,34 +61,34 @@ async def garmin_today(authorization: str = Header(...)):
         client = garth.Client()
         client.loads(garmin_dump)
         
-        # Ensure the session is actually alive
-        if client.expired:
-            print("Session expired, attempting internal refresh...")
-            client.refresh()
-
+        # Date for Garmin requests
         today = datetime.now().date().isoformat()
-        
-        # This specific URL is the most reliable for current daily totals
-        url = f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}"
-        
-        # THE FIX: Use client.connect_get which handles all internal Garmin headers automatically
-        # This bypasses the 403 Forbidden error seen in your logs
-        resp = client.connect_get(url)
-        
-        data = {
-            "summary": resp.json() if resp.status_code == 200 else None,
-            "sleep": None,
-            "hrv": None
+        data = {}
+
+        # These endpoints are the most stable for real-time data
+        endpoints = {
+            "summary": f"/usersummary-service/usersummary/daily/{today}",
+            "sleep": f"/wellness-service/wellness/dailySleepData/{today}",
+            "hrv": f"/hrv-service/hrv/{today}"
         }
 
-        # Attempt sleep separately
-        try:
-            sleep_url = f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}"
-            sleep_resp = client.connect_get(sleep_url)
-            if sleep_resp.status_code == 200:
-                data["sleep"] = sleep_resp.json()
-        except:
-            pass
+        # THE CRITICAL FIX: Use client.connect_get() with ONLY the path
+        # Garth handles the base URL and the authentication headers automatically
+        for key, path in endpoints.items():
+            try:
+                resp = client.connect_get(path)
+                if resp.status_code == 200:
+                    data[key] = resp.json()
+                else:
+                    print(f"Garmin error {key}: {resp.status_code}")
+                    data[key] = None
+            except Exception as e:
+                print(f"Failed to parse {key}: {e}")
+                data[key] = None
+
+        # Fallback check
+        if not data.get("summary"):
+            raise Exception("Garmin session valid but returned no data.")
 
         return data
 
