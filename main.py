@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from datetime import datetime
-import json
+import io
 
 load_dotenv()
 
@@ -36,13 +36,10 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         else:
             client.login(request.username, request.password)
 
-        # FIXED: dump() requires no arguments in newer versions, or uses dumps() for strings
-        # We use dumps() to ensure it returns a string for Firestore storage
+        # Version-proof session dumping
         try:
             dump = client.dumps()
-        except AttributeError:
-            # Fallback for older versions if dumps() doesn't exist
-            import io
+        except:
             f = io.StringIO()
             client.dump(f)
             dump = f.getvalue()
@@ -54,7 +51,7 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
 
         return {"status": "success", "message": "Garmin connected successfully"}
     except Exception as e:
-        print(f"Login Error: {e}")
+        print(f"Login Failure: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/garmin/today")
@@ -71,44 +68,48 @@ async def garmin_today(authorization: str = Header(...)):
         garmin_dump = doc.to_dict().get("garmin_dump")
         client = garth.Client()
         
-        # Load the session
+        # Version-proof session loading
         try:
             client.loads(garmin_dump)
-        except Exception:
-            # Fallback for older library versions
-            import io
+        except:
             client.load(io.StringIO(garmin_dump))
         
         today = datetime.now().date().isoformat()
         
-        # THE UNIVERSAL FETCH FIX: Use the client's internal session directly
-        # This bypasses all 'missing path' or 'attribute' errors in the garth wrapper
+        # USE RAW SESSION: This is the most stable way to bypass 403s and attribute errors
+        # It uses the authenticated session directly without the buggy Garth wrappers
+        sess = client.sess
         data = {}
+        
+        # These URLs are the "source of truth" for the Garmin dashboard
         endpoints = {
             "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
             "sleep": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}"
         }
 
+        # Adding essential browser headers to the session
+        sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Referer": "https://connect.garmin.com/modern/dashboards/daily-summary",
+            "NK": "NT"
+        })
+
         for key, url in endpoints.items():
             try:
-                # client.sess is the raw requests session with all auth cookies already set
-                resp = client.sess.get(url, headers={
-                    "NK": "NT",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                })
+                resp = sess.get(url)
                 if resp.status_code == 200:
                     data[key] = resp.json()
                 else:
-                    print(f"Endpoint {key} failed with status: {resp.status_code}")
+                    print(f"Error {key}: {resp.status_code}")
                     data[key] = None
             except Exception as e:
-                print(f"Error fetching {key}: {e}")
+                print(f"Fetch failed for {key}: {e}")
                 data[key] = None
 
         return data
 
     except Exception as e:
-        print(f"Global Fetch Error: {e}")
+        print(f"Critical Backend Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
