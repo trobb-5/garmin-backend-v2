@@ -33,10 +33,11 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
 
         client = garth.Client()
 
+        # IMPORTANT: garth.login() is synchronous - do NOT use await
         if request.mfa_code:
-            await client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
+            client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
         else:
-            await client.login(request.username, request.password)
+            client.login(request.username, request.password)
 
         # Save session dump
         dump = client.dump()
@@ -65,7 +66,7 @@ async def garmin_today(authorization: str = Header(...)):
 
         garmin_dump = doc.to_dict().get("garmin_dump")
         client = garth.Client()
-        client.resume_from_dump(garmin_dump)   # Correct way to restore session
+        client.resume_from_dump(garmin_dump)
 
         today = datetime.now().strftime("%Y-%m-%d")
 
