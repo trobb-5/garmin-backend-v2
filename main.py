@@ -33,14 +33,13 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
 
         client = garth.Client()
 
-        # IMPORTANT: garth.login() is synchronous - do NOT use await
         if request.mfa_code:
             client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
         else:
             client.login(request.username, request.password)
 
-        # Save session dump
-        dump = client.dump()
+        # FIXED: Use dumps() instead of dump() - this was causing the error
+        dump = client.dumps()
 
         db.collection("users").document(firebase_uid).set({
             "garmin_dump": dump,
@@ -66,7 +65,9 @@ async def garmin_today(authorization: str = Header(...)):
 
         garmin_dump = doc.to_dict().get("garmin_dump")
         client = garth.Client()
-        client.resume_from_dump(garmin_dump)
+
+        # FIXED: Use loads() to restore session
+        client.loads(garmin_dump)
 
         today = datetime.now().strftime("%Y-%m-%d")
 
