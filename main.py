@@ -59,7 +59,6 @@ async def garmin_today(authorization: str = Header(...)):
         # Pull permanent session from Firestore
         doc = db.collection("users").document(firebase_uid).get()
         if not doc.exists:
-            # This 404 is what we saw in your logs; moving to Firestore fixes this!
             raise HTTPException(status_code=404, detail="No Garmin session found in database.")
         
         garmin_dump = doc.to_dict().get("garmin_dump")
@@ -77,9 +76,9 @@ async def garmin_today(authorization: str = Header(...)):
         today = datetime.now().date().isoformat()
         data = {}
 
-        # Fetch all metrics
+        # UPDATED ENDPOINTS: Using dailySummaryChart for real-time steps/calories
         endpoints = {
-            "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
+            "summary": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySummaryChart/{today}",
             "sleep": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}",
             "hrv": f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}",
             "hr": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailyHeartRate/{today}"
