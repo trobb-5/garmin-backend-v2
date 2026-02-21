@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import garth
+import sqlite3
 import os
 from dotenv import load_dotenv
 import firebase_admin
@@ -31,18 +32,14 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         firebase_uid = decoded["uid"]
 
         client = garth.Client()
-        if request.mfa_code:
-            client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
-        else:
-            client.login(request.username, request.password)
 
-        # Version-proof session dumping
-        try:
-            dump = client.dumps()
-        except:
-            f = io.StringIO()
-            client.dump(f)
-            dump = f.getvalue()
+        if request.mfa_code:
+            await client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
+        else:
+            await client.login(request.username, request.password)
+
+        # Save session dump
+        dump = client.dump()
 
         db.collection("users").document(firebase_uid).set({
             "garmin_dump": dump,
@@ -50,6 +47,7 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         }, merge=True)
 
         return {"status": "success", "message": "Garmin connected successfully"}
+
     except Exception as e:
         print(f"Login Failure: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -64,43 +62,37 @@ async def garmin_today(authorization: str = Header(...)):
         doc = db.collection("users").document(firebase_uid).get()
         if not doc.exists:
             raise HTTPException(status_code=404, detail="No Garmin session found.")
-        
+
         garmin_dump = doc.to_dict().get("garmin_dump")
         client = garth.Client()
-        
-        # Version-proof session loading
-        try:
-            client.loads(garmin_dump)
-        except:
-            client.load(io.StringIO(garmin_dump))
-        
-        today = datetime.now().date().isoformat()
-        
-        # USE RAW SESSION: This is the most stable way to bypass 403s and attribute errors
-        # It uses the authenticated session directly without the buggy Garth wrappers
-        sess = client.sess
-        data = {}
-        
-        # These URLs are the "source of truth" for the Garmin dashboard
-        endpoints = {
-            "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
-            "sleep": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}"
-        }
+        client.resume_from_dump(garmin_dump)   # Correct way to restore session
 
-        # Adding essential browser headers to the session
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        sess = client.sess
         sess.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Referer": "https://connect.garmin.com/modern/dashboards/daily-summary",
-            "NK": "NT"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 GarminConnect/5.12.0.0",
+            "Accept": "application/json",
+            "NK": "NT",
+            "X-App-Ver": "5.12.0.0",
+            "X-lang": "en-US",
         })
 
+        endpoints = {
+            "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
+            "sleep":   f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}",
+            "hrv":     f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}",
+            "hr":      f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailyHeartRate/{today}",
+        }
+
+        data = {}
         for key, url in endpoints.items():
             try:
                 resp = sess.get(url)
                 if resp.status_code == 200:
                     data[key] = resp.json()
                 else:
-                    print(f"Error {key}: {resp.status_code}")
+                    print(f"Error {key}: {resp.status_code} - {resp.text[:200]}")
                     data[key] = None
             except Exception as e:
                 print(f"Fetch failed for {key}: {e}")
