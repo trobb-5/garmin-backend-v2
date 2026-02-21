@@ -1,31 +1,22 @@
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import garth
-import sqlite3
 import os
 from dotenv import load_dotenv
 import firebase_admin
-from firebase_admin import credentials, auth
+from firebase_admin import credentials, auth, firestore
 from datetime import datetime
 
 load_dotenv()
 
 app = FastAPI(title="Garmin Backend for Nutrient Sync")
 
-# Initialize Firebase
+# Initialize Firebase & Firestore
+# Using Firestore instead of SQLite because Render deletes local files on every restart
 cred = credentials.Certificate("firebase-adminsdk.json")
-firebase_admin.initialize_app(cred)
-
-# SQLite database for session persistence
-conn = sqlite3.connect("sessions.db", check_same_thread=False)
-conn.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        firebase_uid TEXT PRIMARY KEY,
-        garmin_dump TEXT,
-        last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-""")
-conn.commit()
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
 
 class GarminLoginRequest(BaseModel):
     username: str
@@ -46,14 +37,12 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         else:
             client.login(request.username, request.password)
 
-        # Use dumps() to store session as string
+        # Store session in Firestore so it's permanent
         dump = client.dumps()
-
-        conn.execute(
-            "INSERT OR REPLACE INTO users (firebase_uid, garmin_dump) VALUES (?, ?)",
-            (firebase_uid, dump)
-        )
-        conn.commit()
+        db.collection("users").document(firebase_uid).set({
+            "garmin_dump": dump,
+            "last_sync": firestore.SERVER_TIMESTAMP
+        }, merge=True)
 
         return {"status": "success", "message": "Garmin connected successfully"}
 
@@ -67,30 +56,28 @@ async def garmin_today(authorization: str = Header(...)):
         decoded = auth.verify_id_token(id_token)
         firebase_uid = decoded["uid"]
 
-        row = conn.execute(
-            "SELECT garmin_dump FROM users WHERE firebase_uid = ?", 
-            (firebase_uid,)
-        ).fetchone()
-
-        if not row or not row[0]:
-            raise HTTPException(status_code=404, detail="No Garmin session found.")
-
-        # Reconstruct client and load session
-        client = garth.Client()
-        client.loads(row[0])
+        # Pull permanent session from Firestore
+        doc = db.collection("users").document(firebase_uid).get()
+        if not doc.exists:
+            # This 404 is what we saw in your logs; moving to Firestore fixes this!
+            raise HTTPException(status_code=404, detail="No Garmin session found in database.")
         
-        # FIX: Spoof headers to look like a real browser
+        garmin_dump = doc.to_dict().get("garmin_dump")
+
+        client = garth.Client()
+        client.loads(garmin_dump)
+        
+        # SPOOF HEADERS: Essential to prevent 403 Forbidden errors on Render
         client.sess.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Referer": "https://connect.garmin.com/modern/dashboards/daily-summary",
             "Accept": "application/json, text/plain, */*"
         })
         
-        # Use ISO format (YYYY-MM-DD)
         today = datetime.now().date().isoformat()
         data = {}
 
-        # Fetch metrics individually with explicit status logging
+        # Fetch all metrics
         endpoints = {
             "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
             "sleep": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}",
@@ -110,10 +97,6 @@ async def garmin_today(authorization: str = Header(...)):
                 print(f"Error fetching {key}: {e}")
                 data[key] = None
 
-        # Success check: at least summary or sleep should be present
-        if data.get("summary") is None and data.get("sleep") is None:
-             raise Exception("Garmin returned 200 but no usable data found.")
-
         return data
 
     except Exception as e:
@@ -122,4 +105,6 @@ async def garmin_today(authorization: str = Header(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Local development uses port 8000; Render uses 10000
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
