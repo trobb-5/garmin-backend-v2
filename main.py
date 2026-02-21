@@ -12,11 +12,11 @@ load_dotenv()
 
 app = FastAPI(title="Garmin Backend for Nutrient Sync")
 
-# Initialize Firebase (you will upload the JSON file later on Render)
+# Initialize Firebase
 cred = credentials.Certificate("firebase-adminsdk.json")
 firebase_admin.initialize_app(cred)
 
-# SQLite database for multiple users
+# SQLite database for session persistence
 conn = sqlite3.connect("sessions.db", check_same_thread=False)
 conn.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -39,12 +39,13 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         decoded = auth.verify_id_token(id_token)
         firebase_uid = decoded["uid"]
 
-        client = garth.GarthClient()
+        # FIX: Garth updated the class name from GarthClient to Client
+        client = garth.Client()
 
         if request.mfa_code:
-            await client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
+            client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
         else:
-            await client.login(request.username, request.password)
+            client.login(request.username, request.password)
 
         dump = client.dump()
 
@@ -72,16 +73,15 @@ async def garmin_today(authorization: str = Header(...)):
         ).fetchone()
 
         if not row or not row[0]:
-            raise HTTPException(status_code=404, detail="No Garmin session found. Please login again.")
+            raise HTTPException(status_code=404, detail="No Garmin session found.")
 
-        client = garth.GarthClient.from_dump(row[0])
-
+        client = garth.Client.from_dump(row[0])
         today = datetime.now().strftime("%Y-%m-%d")
 
-        summary = client.get(f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}")
-        sleep = client.get(f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}")
-        hrv = client.get(f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}")
-        hr = client.get(f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailyHeartRate/{today}")
+        summary = client.get(f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}").json()
+        sleep = client.get(f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}").json()
+        hrv = client.get(f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}").json()
+        hr = client.get(f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailyHeartRate/{today}").json()
 
         return {
             "summary": summary,
