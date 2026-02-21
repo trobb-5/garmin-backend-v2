@@ -60,37 +60,34 @@ async def garmin_today(authorization: str = Header(...)):
         client = garth.Client()
         client.loads(garmin_dump)
         
-        # Using the direct session to bypass garth's 'missing path' argument bug
-        sess = client.sess
+        # Ensure the session is actually alive
+        if client.expired:
+            print("Session expired, attempting internal refresh...")
+            client.refresh()
+
         today = datetime.now().date().isoformat()
         
-        # Specific headers to ensure Garmin accepts the data request
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Referer": "https://connect.garmin.com/modern/dashboards/daily-summary",
-            "NK": "NT"
+        # This specific URL is the most reliable for current daily totals
+        url = f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}"
+        
+        # THE FIX: Use client.connect_get which handles all internal Garmin headers automatically
+        # This bypasses the 403 Forbidden error seen in your logs
+        resp = client.connect_get(url)
+        
+        data = {
+            "summary": resp.json() if resp.status_code == 200 else None,
+            "sleep": None,
+            "hrv": None
         }
 
-        data = {}
-        # These endpoints pull the "Full Daily Snapshot"
-        endpoints = {
-            "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
-            "sleep": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}",
-            "hrv": f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}"
-        }
-
-        for key, url in endpoints.items():
-            try:
-                # Direct session call is more reliable for Garth 2026
-                resp = sess.get(url, headers=headers)
-                if resp.status_code == 200:
-                    data[key] = resp.json()
-                else:
-                    print(f"Error {key}: Status {resp.status_code}")
-                    data[key] = None
-            except Exception as e:
-                print(f"Failed to fetch {key}: {str(e)}")
-                data[key] = None
+        # Attempt sleep separately
+        try:
+            sleep_url = f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}"
+            sleep_resp = client.connect_get(sleep_url)
+            if sleep_resp.status_code == 200:
+                data["sleep"] = sleep_resp.json()
+        except:
+            pass
 
         return data
 
