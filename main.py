@@ -42,12 +42,11 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         client = garth.Client()
 
         if request.mfa_code:
-            # The prompt_mfa lambda allows garth to use the code provided by Flutter
             client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
         else:
             client.login(request.username, request.password)
 
-        # FIXED: Use dumps() (string) for database storage compatibility
+        # Use dumps() to store session as string
         dump = client.dumps()
 
         conn.execute(
@@ -80,35 +79,40 @@ async def garmin_today(authorization: str = Header(...)):
         client = garth.Client()
         client.loads(row[0])
         
-        # Use ISO format (YYYY-MM-DD) which is strictly required by Garmin proxy
+        # FIX: Spoof headers to look like a real browser
+        client.sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Referer": "https://connect.garmin.com/modern/dashboards/daily-summary",
+            "Accept": "application/json, text/plain, */*"
+        })
+        
+        # Use ISO format (YYYY-MM-DD)
         today = datetime.now().date().isoformat()
-
-        # Fetch metrics individually so one failure doesn't break the whole request
         data = {}
 
-        try:
-            data["summary"] = client.get(f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}").json()
-        except Exception:
-            data["summary"] = None
+        # Fetch metrics individually with explicit status logging
+        endpoints = {
+            "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
+            "sleep": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}",
+            "hrv": f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}",
+            "hr": f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailyHeartRate/{today}"
+        }
 
-        try:
-            data["sleep"] = client.get(f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}").json()
-        except Exception:
-            data["sleep"] = None
+        for key, url in endpoints.items():
+            try:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    data[key] = resp.json()
+                else:
+                    print(f"Garmin API Info: {key} returned status {resp.status_code}")
+                    data[key] = None
+            except Exception as e:
+                print(f"Error fetching {key}: {e}")
+                data[key] = None
 
-        try:
-            data["hrv"] = client.get(f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}").json()
-        except Exception:
-            data["hrv"] = None
-
-        try:
-            data["hr"] = client.get(f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailyHeartRate/{today}").json()
-        except Exception:
-            data["hr"] = None
-
-        # Logic check: if we have at least the summary, we consider it a success
-        if data["summary"] is None and data["sleep"] is None:
-             raise Exception("Garmin returned no data for today yet.")
+        # Success check: at least summary or sleep should be present
+        if data.get("summary") is None and data.get("sleep") is None:
+             raise Exception("Garmin returned 200 but no usable data found.")
 
         return data
 
