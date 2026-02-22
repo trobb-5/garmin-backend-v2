@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
-from datetime import datetime
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -43,16 +43,12 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         client = garth.Client()
 
         if request.mfa_code:
-            # Second attempt — user supplied MFA code
             client.login(
                 request.username,
                 request.password,
                 prompt_mfa=lambda: request.mfa_code,
             )
         else:
-            # First attempt — if Garmin requires MFA, garth calls input()
-            # which raises EOFError on Render (no terminal). Catch it and
-            # tell the app to ask the user for their MFA code.
             try:
                 client.login(request.username, request.password)
             except EOFError:
@@ -106,7 +102,6 @@ async def garmin_today(authorization: str = Header(...)):
             except Exception as e:
                 print(f"Could not fetch displayName: {e}")
 
-        from datetime import timedelta
         today     = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -137,22 +132,51 @@ async def garmin_today(authorization: str = Header(...)):
                     result[key] = None
             return result
 
-        # Try today first. If the server UTC clock is ahead of the user local
-        # date (e.g. 11 PM EST = next day UTC), Garmin returns a shell with
-        # includesActivityData=false. Fall back to yesterday in that case.
-        data = fetch_all(build_endpoints(today))
-        summary_check = data.get("summary") or {}
-        if not summary_check.get("includesActivityData", False):
-            print(f"No activity data for {today} (UTC/local mismatch), falling back to {yesterday}")
-            yesterday_data = fetch_all(build_endpoints(yesterday))
-            data["summary"] = yesterday_data.get("summary") or data["summary"]
-            data["hr"]      = yesterday_data.get("hr")      or data["hr"]
-            data["hrv"]     = yesterday_data.get("hrv")     or data["hrv"]
-            # Sleep: prefer whichever has dailySleepDTO
-            sleep_today = data.get("sleep") or {}
-            sleep_yest  = yesterday_data.get("sleep") or {}
-            if sleep_yest.get("dailySleepDTO") and not sleep_today.get("dailySleepDTO"):
+        def has_activity_data(summary: dict) -> bool:
+            """
+            Check for real step data rather than relying on includesActivityData.
+            Garmin keeps includesActivityData=false for most of the day even
+            when steps/calories are actively being synced. totalSteps > 0
+            is the reliable signal that the watch has synced real data.
+            """
+            if not summary:
+                return False
+            steps = summary.get("totalSteps")
+            return steps is not None and steps > 0
+
+        # ── Fetch today ──────────────────────────────────────────────────
+        data          = fetch_all(build_endpoints(today))
+        today_summary = data.get("summary") or {}
+
+        if has_activity_data(today_summary):
+            # Today has real step data — use it for activity, HR, HRV.
+            # Sleep is always last night's data, so always pull from yesterday.
+            print(f"Using today ({today}) for activity: {today_summary.get('totalSteps')} steps")
+            yesterday_data = fetch_all({"sleep": build_endpoints(yesterday)["sleep"]})
+            sleep_yest     = yesterday_data.get("sleep") or {}
+            sleep_today    = data.get("sleep") or {}
+            # Prefer yesterday's sleep if it has the actual DTO
+            if sleep_yest.get("dailySleepDTO"):
                 data["sleep"] = sleep_yest
+                print(f"Using yesterday ({yesterday}) for sleep")
+            elif sleep_today.get("dailySleepDTO"):
+                print(f"Using today's sleep data")
+            else:
+                print("No sleep DTO found in either date")
+        else:
+            # Today has no step data yet — fall back to yesterday for everything
+            print(f"No step data for {today}, falling back to {yesterday}")
+            yesterday_data = fetch_all(build_endpoints(yesterday))
+            data["summary"] = yesterday_data.get("summary") or today_summary
+            data["hr"]      = yesterday_data.get("hr")      or data.get("hr")
+            data["hrv"]     = yesterday_data.get("hrv")     or data.get("hrv")
+            # Sleep: prefer whichever has dailySleepDTO
+            sleep_yest  = yesterday_data.get("sleep") or {}
+            sleep_today = data.get("sleep") or {}
+            if sleep_yest.get("dailySleepDTO"):
+                data["sleep"] = sleep_yest
+            elif not sleep_today.get("dailySleepDTO"):
+                data["sleep"] = sleep_yest  # best we have
 
         db.collection("users").document(firebase_uid).set(
             {"last_sync": firestore.SERVER_TIMESTAMP}, merge=True)
@@ -164,7 +188,7 @@ async def garmin_today(authorization: str = Header(...)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# ── Debug endpoint — call once to see exact field names ─────────────────────
+# ── Debug endpoint ───────────────────────────────────────────────────────────
 @app.get("/garmin/debug")
 async def garmin_debug(authorization: str = Header(...)):
     """Returns full raw response from each endpoint so we can verify field names."""
@@ -189,7 +213,7 @@ async def garmin_debug(authorization: str = Header(...)):
         for key, path in endpoints.items():
             try:
                 result = client.connectapi(path)
-                out["data"][key] = result  # Full raw response
+                out["data"][key] = result
                 print(f"DEBUG {key}: {result}")
             except Exception as e:
                 out["data"][key] = {"error": str(e)}
