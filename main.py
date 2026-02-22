@@ -41,10 +41,27 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         firebase_uid = decoded["uid"]
 
         client = garth.Client()
+
         if request.mfa_code:
-            client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
+            # Second attempt — user supplied MFA code
+            client.login(
+                request.username,
+                request.password,
+                prompt_mfa=lambda: request.mfa_code,
+            )
         else:
-            client.login(request.username, request.password)
+            # First attempt — if Garmin requires MFA, garth calls input()
+            # which raises EOFError on Render (no terminal). Catch it and
+            # tell the app to ask the user for their MFA code.
+            try:
+                client.login(request.username, request.password)
+            except EOFError:
+                raise HTTPException(status_code=401, detail="MFA_REQUIRED")
+            except Exception as e:
+                err = str(e)
+                if "MFA" in err or "TOTP" in err or "two-factor" in err.lower() or "2fa" in err.lower():
+                    raise HTTPException(status_code=401, detail="MFA_REQUIRED")
+                raise
 
         dump = client.dumps()
 
