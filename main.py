@@ -1,13 +1,11 @@
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import garth
-import sqlite3
 import os
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from datetime import datetime
-import io
 
 load_dotenv()
 
@@ -19,10 +17,12 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
+
 class GarminLoginRequest(BaseModel):
     username: str
     password: str
     mfa_code: str | None = None
+
 
 @app.post("/garmin/login")
 async def garmin_login(request: GarminLoginRequest, authorization: str = Header(...)):
@@ -32,15 +32,12 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
         firebase_uid = decoded["uid"]
 
         client = garth.Client()
-
         if request.mfa_code:
             client.login(request.username, request.password, prompt_mfa=lambda: request.mfa_code)
         else:
             client.login(request.username, request.password)
 
-        # FIXED: Use dumps() instead of dump() - this was causing the error
         dump = client.dumps()
-
         db.collection("users").document(firebase_uid).set({
             "garmin_dump": dump,
             "last_sync": firestore.SERVER_TIMESTAMP
@@ -51,6 +48,7 @@ async def garmin_login(request: GarminLoginRequest, authorization: str = Header(
     except Exception as e:
         print(f"Login Failure: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.get("/garmin/today")
 async def garmin_today(authorization: str = Header(...)):
@@ -65,46 +63,40 @@ async def garmin_today(authorization: str = Header(...)):
 
         garmin_dump = doc.to_dict().get("garmin_dump")
         client = garth.Client()
-
-        # FIXED: Use loads() to restore session
         client.loads(garmin_dump)
 
         today = datetime.now().strftime("%Y-%m-%d")
 
-        sess = client.sess
-        sess.headers.update({
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 GarminConnect/5.12.0.0",
-            "Accept": "application/json",
-            "NK": "NT",
-            "X-App-Ver": "5.12.0.0",
-            "X-lang": "en-US",
-        })
-
+        # FIX: Use client.connectapi() — this uses garth's session which injects
+        # the correct OAuth/SSO headers that Garmin's Cloudflare expects.
+        # sess.get() bypasses those headers, causing 403 "Just a moment" blocks.
         endpoints = {
-            "summary": f"https://connect.garmin.com/modern/proxy/usersummary-service/usersummary/daily/{today}",
-            "sleep":   f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailySleepData/{today}",
-            "hrv":     f"https://connect.garmin.com/modern/proxy/hrv-service/hrv/{today}",
-            "hr":      f"https://connect.garmin.com/modern/proxy/wellness-service/wellness/dailyHeartRate/{today}",
+            "summary": f"/usersummary-service/usersummary/daily/{today}",
+            "sleep":   f"/wellness-service/wellness/dailySleepData/{today}",
+            "hrv":     f"/hrv-service/hrv/{today}",
+            "hr":      f"/wellness-service/wellness/dailyHeartRate/{today}",
         }
 
         data = {}
-        for key, url in endpoints.items():
+        for key, path in endpoints.items():
             try:
-                resp = sess.get(url)
-                if resp.status_code == 200:
-                    data[key] = resp.json()
-                else:
-                    print(f"Error {key}: {resp.status_code} - {resp.text[:200]}")
-                    data[key] = None
+                data[key] = client.connectapi(path)
+                print(f"OK {key}: fetched successfully")
             except Exception as e:
-                print(f"Fetch failed for {key}: {e}")
+                print(f"Error {key}: {e}")
                 data[key] = None
+
+        # Update last_sync timestamp after successful fetch
+        db.collection("users").document(firebase_uid).set({
+            "last_sync": firestore.SERVER_TIMESTAMP
+        }, merge=True)
 
         return data
 
     except Exception as e:
         print(f"Critical Backend Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
