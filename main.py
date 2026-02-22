@@ -106,33 +106,53 @@ async def garmin_today(authorization: str = Header(...)):
             except Exception as e:
                 print(f"Could not fetch displayName: {e}")
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        from datetime import timedelta
+        today     = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        endpoints = {
-            "summary": f"/usersummary-service/usersummary/daily/{display_name}?calendarDate={today}",
-            "sleep":   f"/wellness-service/wellness/dailySleepData/{display_name}?date={today}",
-            "hr":      f"/wellness-service/wellness/dailyHeartRate/{display_name}?date={today}",
-            "hrv":     f"/hrv-service/hrv/{today}",
-        } if display_name else {
-            "summary": f"/usersummary-service/usersummary/daily/{today}",
-            "sleep":   f"/wellness-service/wellness/dailySleepData/{today}",
-            "hr":      f"/wellness-service/wellness/dailyHeartRate/{today}",
-            "hrv":     f"/hrv-service/hrv/{today}",
-        }
+        def build_endpoints(date):
+            if display_name:
+                return {
+                    "summary": f"/usersummary-service/usersummary/daily/{display_name}?calendarDate={date}",
+                    "sleep":   f"/wellness-service/wellness/dailySleepData/{display_name}?date={date}",
+                    "hr":      f"/wellness-service/wellness/dailyHeartRate/{display_name}?date={date}",
+                    "hrv":     f"/hrv-service/hrv/{date}",
+                }
+            return {
+                "summary": f"/usersummary-service/usersummary/daily/{date}",
+                "sleep":   f"/wellness-service/wellness/dailySleepData/{date}",
+                "hr":      f"/wellness-service/wellness/dailyHeartRate/{date}",
+                "hrv":     f"/hrv-service/hrv/{date}",
+            }
 
-        data = {}
-        for key, path in endpoints.items():
-            try:
-                result = client.connectapi(path)
-                data[key] = result
-                # Log top-level keys so we can see the actual structure
-                if isinstance(result, dict):
-                    print(f"OK {key}: keys={list(result.keys())}")
-                else:
-                    print(f"OK {key}: type={type(result)}")
-            except Exception as e:
-                print(f"Error {key}: {e}")
-                data[key] = None
+        def fetch_all(endpoints):
+            result = {}
+            for key, path in endpoints.items():
+                try:
+                    r = client.connectapi(path)
+                    result[key] = r
+                    print(f"OK {key} keys={list(r.keys()) if isinstance(r, dict) else type(r)}")
+                except Exception as e:
+                    print(f"Error {key}: {e}")
+                    result[key] = None
+            return result
+
+        # Try today first. If the server UTC clock is ahead of the user local
+        # date (e.g. 11 PM EST = next day UTC), Garmin returns a shell with
+        # includesActivityData=false. Fall back to yesterday in that case.
+        data = fetch_all(build_endpoints(today))
+        summary_check = data.get("summary") or {}
+        if not summary_check.get("includesActivityData", False):
+            print(f"No activity data for {today} (UTC/local mismatch), falling back to {yesterday}")
+            yesterday_data = fetch_all(build_endpoints(yesterday))
+            data["summary"] = yesterday_data.get("summary") or data["summary"]
+            data["hr"]      = yesterday_data.get("hr")      or data["hr"]
+            data["hrv"]     = yesterday_data.get("hrv")     or data["hrv"]
+            # Sleep: prefer whichever has dailySleepDTO
+            sleep_today = data.get("sleep") or {}
+            sleep_yest  = yesterday_data.get("sleep") or {}
+            if sleep_yest.get("dailySleepDTO") and not sleep_today.get("dailySleepDTO"):
+                data["sleep"] = sleep_yest
 
         db.collection("users").document(firebase_uid).set(
             {"last_sync": firestore.SERVER_TIMESTAMP}, merge=True)
