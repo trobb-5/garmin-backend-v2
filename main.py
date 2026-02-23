@@ -150,19 +150,23 @@ async def garmin_today(authorization: str = Header(...)):
 
         if has_activity_data(today_summary):
             # Today has real step data — use it for activity, HR, HRV.
-            # Sleep is always last night's data, so always pull from yesterday.
             print(f"Using today ({today}) for activity: {today_summary.get('totalSteps')} steps")
-            yesterday_data = fetch_all({"sleep": build_endpoints(yesterday)["sleep"]})
-            sleep_yest     = yesterday_data.get("sleep") or {}
-            sleep_today    = data.get("sleep") or {}
-            # Prefer yesterday's sleep if it has the actual DTO
-            if sleep_yest.get("dailySleepDTO"):
-                data["sleep"] = sleep_yest
-                print(f"Using yesterday ({yesterday}) for sleep")
-            elif sleep_today.get("dailySleepDTO"):
-                print(f"Using today's sleep data")
+
+            # Sleep: Garmin records the session under the date it ENDED
+            # (the morning you woke up), so last night's sleep is stored
+            # under today's date. Try today first; only fall back to
+            # yesterday if today has no dailySleepDTO yet.
+            sleep_today = data.get("sleep") or {}
+            if sleep_today.get("dailySleepDTO"):
+                print(f"Using today ({today}) for sleep (session ended this morning)")
             else:
-                print("No sleep DTO found in either date")
+                yest_sleep_data = fetch_all({"sleep": build_endpoints(yesterday)["sleep"]})
+                sleep_yest = yest_sleep_data.get("sleep") or {}
+                if sleep_yest.get("dailySleepDTO"):
+                    data["sleep"] = sleep_yest
+                    print(f"No sleep DTO for today, falling back to yesterday ({yesterday})")
+                else:
+                    print("No sleep DTO found for either date")
         else:
             # Today has no step data yet — fall back to yesterday for everything
             print(f"No step data for {today}, falling back to {yesterday}")
